@@ -1,0 +1,79 @@
+data = read.csv("train.csv")
+
+# Structure of the data
+str(data)
+
+# Convert into date format
+data$Date = anytime::anydate(data$Date)
+
+# Add rows with missing dates and fill the sales as 0 for these dates
+library(tidyr)
+data_new = complete(data, nesting(Store, Dept), Date, fill = list(Weekly_Sales = 0))
+
+# Summarizing the Sales
+data_2 = data_new %>%
+  select(names(data_new)) %>%
+  group_by(Store, Dept, Date) %>%
+  summarise(Total_Weekly_Sales = sum(Weekly_Sales))
+
+# Converting the dataframe to a data table to add counts
+data_3 = as.data.table(data_2)
+
+# Adding counts for each by grouping (Planning_Group, Product_Size)
+data_3 = data_3[, Counts := .N, by = c("Store","Dept")]
+
+# Checking if the Counts remain the same - All the values should be equal
+summary(data_3$Counts)
+
+# CatBoost - Modelling
+CatBoostResults_weekly = RemixAutoML::AutoCatBoostCARMA( 
+  data = data_3,
+  TargetColumnName = "Total_Weekly_Sales",
+  DateColumnName = "Date",
+  GroupVariables = c("Store","Dept"),
+  FC_Periods = 9 ,                                        # FC_Periods = (Number of weeks we want to forecast ahead + 1)
+  TimeUnit = "week",
+  TargetTransformation = TRUE,
+  Lags = c(1:12, 51, 52),
+  MA_Periods = c(1:12, 51, 52),
+  CalendarVariables = TRUE,
+  TimeTrendVariable = TRUE, 
+  HolidayVariable = TRUE,
+  DataTruncate = FALSE,
+  SplitRatios = c(0.65, 0.1, 0.25),
+  TaskType = "CPU",
+  EvalMetric = "RMSE",
+  GridTune = FALSE,
+  GridEvalMetric = "r2",
+  ModelCount = 2,
+  NTrees = 1000,
+  PartitionType = "timeseries",
+  Timer = TRUE)
+
+Max_Date = max(data_3$Date)
+Current_Date = as.Date(Max_Date + 7)
+
+# Output----
+
+# Time series Plot
+CatBoostResults_weekly$TimeSeriesPlot
+
+# Measurement metrics for each Times series
+CatBoost_Results_weekly = CatBoostResults_weekly$ModelInformation$EvaluationMetricsByGroup
+
+# Forecasts
+forecast_weekly = CatBoostResults_weekly[["Forecast"]]
+
+# Filter the forecasts for the next 8 weeks
+check_weekly = forecast_weekly[forecast_weekly$Date >= as.Date(Current_Date), ]
+
+check_weekly$Predictions = floor(check_weekly$Predictions)
+check_weekly$Total_Pieces_Sold = floor(check_weekly$Total_Weekly_Sales)
+
+forecast_output_weekly = check_weekly[, c(1,4,5,3)]
+
+#Convert negative forecasts to 0
+forecast_output_weekly = forecast_output_weekly %>%
+  mutate(Predictions = ifelse(Predictions<0, 0, Predictions))
+#-----------------------------------------------------------------------------------------------------------------------------
+
